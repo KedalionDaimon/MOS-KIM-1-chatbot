@@ -1,0 +1,407 @@
+This is a chatbot system for the MOS KIM-1 (tested on KIM Uno).
+
+For a video demonstration, see:
+
+https://youtu.be/7MJgi5kua3M
+
+The operation is simple: in $0010, the user enters a byte, goes to $0200,
+runs the second program below, and receives as answer:
+- in $0011, the matching value (how "trustworthy" the reply appears);
+- in $0012, "as what" the match has been recognized; and
+- in $0013, the actual "reply" (again, a byte).
+
+So the interaction basically goes, "ask a byte - get a byte".
+
+The knowledge is organized thereby in "challenge-reply-pairs" - one byte in 
+$0300 and following and its respective reply in $0380 and following. When the
+user inputs a byte, the "challenge" halves of each challenge-reply pair is
+examined, the most similar (and most recent, if equally similar) challenge is
+determined, and the known reply to that challenge is output. Basically, here
+a byte may be seen as a "bit field of properties", and in so far, the
+interaction makes sense.
+
+How does the system learn? - Well, when the system replies, and then the user
+answers, then the fact that "such-and-such system reply is followed by
+such-and-such user input" can be learned - and thus, a new challenge-reply
+pair is added to the knowledge (forgetting the oldest one). There is space for
+128 challenge-reply pairs.
+
+The similarity of the user input to a challenge is determined through
+comparing overlapping 1s and 0s to a known byte. I.e. if the user challenge is
+01001101 and e.g. a known byte from the challenges is 01111100, then the
+similarity will be "5" (with 3 bits not matching).
+
+To avoid a cumbersome startup, the first program shown below - at address
+$0100 - serves merely to pre-populate a little bit the knowledge, so as to
+allow a "nucleus" of challenge-response pairs to serve to "kick-start" the
+exchange with the user, and this nucleus will be replaced rather quickly by
+the results of the actual conversation.
+
+Both programs - the "pre-populator" and the actual "chatbot" - are shown
+below in assembly, as well as in hex codes in case you wish to directly
+input them into your KIM-1.
+
+; clear the memory and initialize bitpatterns as nucleus
+.org $0100
+ldy #$00
+annul lda #$00 ; empty the $0300 segment
+sta $0300,y
+sta $0380,y
+tya
+cmp #$7f
+beq done
+iny
+jmp annul
+done lda #$ff
+sta $0312
+sta $0392
+lda #$f0
+sta $0313
+sta $0393
+lda #$0f
+sta $0314
+sta $0394
+lda #$cc
+sta $0315
+sta $0395
+lda #$33
+sta $0316
+sta $0396
+lda #$aa
+sta $0317
+sta $0397
+lda #$55
+sta $0318
+sta $0398
+lda #$99
+sta $0319
+sta $0399
+lda #$66
+sta $031a
+sta $039a
+lda #$c3
+sta $031b
+sta $039b
+lda #$3c
+sta $031c
+sta $039c
+brk
+
+11111111 ff
+11110000 f0
+00001111 0f
+11001100 cc
+00110011 33
+10101010 aa
+01010101 55
+10011001 99
+01100110 66
+11000011 c3
+00111100 3c
+
+0100: A0 00 A9 00 99 00 03 99
+0108: 80 03 98 C9 7F F0 04 C8
+0110: 4C 02 01 A9 FF 8D 12 03
+0118: 8D 92 03 A9 F0 8D 13 03
+0120: 8D 93 03 A9 0F 8D 14 03
+0128: 8D 94 03 A9 CC 8D 15 03
+0130: 8D 95 03 A9 33 8D 16 03
+0138: 8D 96 03 A9 AA 8D 17 03
+0140: 8D 97 03 A9 55 8D 18 03
+0148: 8D 98 03 A9 99 8D 19 03
+0150: 8D 99 03 A9 66 8D 1A 03
+0158: 8D 9A 03 A9 C3 8D 1B 03
+0160: 8D 9B 03 A9 3C 8D 1C 03
+0168: 8D 9C 03 00
+
+
+
+
+.org $0200
+; lda #$9b  ; delete setup of user input and
+; sta $10   ; simply input what you have to say each run into $10
+jsr shiftlp ; shift knowledge and update challenge-reply
+lda #$00  ; set intermediate best match ($11) to zero
+sta $11
+ldy #$00  ; initialize knowledge array offset 
+values lda $10 ; determine the best match to the input, copy input to $00
+sta $00
+lda $0380,y ; check the possible result reply: if it is 0, avoid it
+cmp #$00
+beq noupd   ; i.e. do not even try to check the match quality, just skip it.
+lda $0300,y ; go through the first half of the knowledge array,
+sta $01     ; suggesting a possible match in $01 of input with experience
+jsr detval  ; determine the value of the suggested match
+lda $11     ; afterwards, compare the intermediate value in $11 with
+cmp $04     ; the value of the match now in $04
+beq doupdt  ; optional: do update the intermediate match if equally good
+bcs noupd   ; if the match is not better, no intermediate match update occurs
+doupdt lda $04 ; if the match is better, take its value from $04
+sta $11     ; as the new intermediate value to compare against next
+lda $0300,y ; and also save the challenge
+sta $12     ; into $12, as well as the corresponding
+lda $0380,y ; reply into $13, as intermediate best (and at some point final)
+sta $13     ; reply, once the entire knowledge arrayis has been examined
+noupd tya   ; have we reached the end of the knowledge array?
+cmp #$7e    ; max length of the array offset allowed
+beq endval  ; if yes, terminate the run
+iny         ; otherwise, increase the offset towards the next knowledge element
+jmp values  ; and go evaluate does it maybe match the user challenge better
+endval brk  ; interaction run terminated
+detval lda #$08 ; subroutine to determine the similarity between two bytes
+sta $05    ; store the bitlength of 8 as a loop counter
+lda $00    ; create working copies of the bytes at $00 and $01 into
+sta $06    ; $06 and $07, respectively
+lda $01
+sta $07
+lda #$00   ; zero out the match value at $04
+sta $04
+jsr cmpbit ; compare the bits that are both 1
+lda #$08   ; prepare the byte length of 8 for the next comparison,
+sta $05    ; again storing it in the loop counter
+lda #$ff   ; XORing with 11111111b in order to produce NOT x
+eor $06    ; the idea being to switch the 0s to 1s
+sta $00    ; in each of the two bytes, and vice versa, in order to
+lda #$ff
+eor $07
+sta $01
+jsr cmpbit ; allow a second comparison, this time "matching 0s" (as 1s)
+rts        ; return, with the count of matching digits in $04
+cmpbit lda #$00 ; zero out the bytes $02 and $03,
+sta $02    ; which are responsible for testing is there a corresponding bit
+sta $03    ; in each of the bytes being checked
+asl $00    ; exfiltrate from the first byte one bit into the carry
+ror $02    ; and save the carry into $02
+asl $01    ; now exfiltrate a bit from the second byte into the carry
+ror $03    ; and save it into the second byte
+lda $02
+clc
+and $03    ; AND the saved carries, thus seeing were they both on
+beq nobit  ; if the result is 0, at least one was not on - bit not counted
+inc $04    ; otherwise increase the sum of matching bits
+nobit dec $05 ; test are we done with all 8 bits,
+bne cmpbit ; and if not, go compare the next bit
+rts
+shiftlp ldy #$00 ; routine to shift bothhalves of the knowledge
+shiftl2 lda $0301,y ; first, shift all challenges, 300=301, 301=302,...
+sta $0300,y
+lda $0381,y      ; and then shift all replies, 380=381, 381=382,... 3fe=3ff
+sta $0380,y
+tya
+cmp #$7f         ; check did you shift 127 times, then end
+beq endshf
+iny              ; otherwise, prepare the offset to shift the next two numbers
+jmp shiftl2
+endshf lda $10   ; once shifting of the knowledge has been completed, 
+sta $03ff        ; save the user input as the newest reply
+lda $13          ; and save the machine's previous answer as the latest
+sta $037f        ; challenge for that reply to have been given.
+rts
+
+0200: 20 7F 02 A9 00 85 11 A0
+0208: 00 A5 10 85 00 B9 80 03
+0210: C9 00 F0 1E B9 00 03 85
+0218: 01 20 3C 02 A5 11 C5 04
+0220: F0 02 B0 0E A5 04 85 11
+0228: B9 00 03 85 12 B9 80 03
+0230: 85 13 98 C9 7E F0 04 C8
+0238: 4C 09 02 00 A9 08 85 05
+0240: A5 00 85 06 A5 01 85 07
+0248: A9 00 85 04 20 63 02 A9
+0250: 08 85 05 A9 FF 45 06 85
+0258: 00 A9 FF 45 07 85 01 20
+0260: 63 02 60 A9 00 85 02 85
+0268: 03 06 00 66 02 06 01 66
+0270: 03 A5 02 18 25 03 F0 02
+0278: E6 04 C6 05 D0 E5 60 A0
+0280: 00 B9 01 03 99 00 03 B9
+0288: 81 03 99 80 03 98 C9 7F
+0290: F0 04 C8 4C 81 02 A5 10
+0298: 8D FF 03 A5 13 8D 7F 03
+02A0: 60
+
+pass 1
+
+LINE  LOC          LABEL     PICT
+
+   1  0200                   .ORG $0200
+   2                         ; lda #$9b  ; delete setup of user input and
+   3                         ; sta $10   ; simply input what you have to say each run into $10
+   4  0200                   JSR SHIFTLP ; shift knowledge and update challenge-reply
+   5  0203                   LDA #$00 ; set intermediate best match ($11) to zero
+   6  0205                   STA $11
+   7  0207                   LDY #$00 ; initialize knowledge array offset 
+   8  0209         VALUES    LDA $10 ; determine the best match to the input, copy input to $00
+   9  020B                   STA $00
+  10  020D                   LDA $0380,Y ; check the possible result reply: if it is 0, avoid it
+  11  0210                   CMP #$00
+  12  0212                   BEQ NOUPD ; i.e. do not even try to check the match quality, just skip it.
+  13  0214                   LDA $0300,Y ; go through the first half of the knowledge array,
+  14  0217                   STA $01 ; suggesting a possible match in $01 of input with experience
+  15  0219                   JSR DETVAL ; determine the value of the suggested match
+  16  021C                   LDA $11 ; afterwards, compare the intermediate value in $11 with
+  17  021E                   CMP $04 ; the value of the match now in $04
+  18  0220                   BEQ DOUPDT ; optional: do update the intermediate match if equally good
+  19  0222                   BCS NOUPD ; if the match is not better, no intermediate match update occurs
+  20  0224         DOUPDT    LDA $04 ; if the match is better, take its value from $04
+  21  0226                   STA $11 ; as the new intermediate value to compare against next
+  22  0228                   LDA $0300,Y ; and also save the challenge
+  23  022B                   STA $12 ; into $12, as well as the corresponding
+  24  022D                   LDA $0380,Y ; reply into $13, as intermediate best (and at some point final)
+  25  0230                   STA $13 ; reply, once the entire knowledge arrayis has been examined
+  26  0232         NOUPD     TYA ; have we reached the end of the knowledge array?
+  27  0233                   CMP #$7E ; max length of the array offset allowed
+  28  0235                   BEQ ENDVAL ; if yes, terminate the run
+  29  0237                   INY ; otherwise, increase the offset towards the next knowledge element
+  30  0238                   JMP VALUES ; and go evaluate does it maybe match the user challenge better
+  31  023B         ENDVAL    BRK ; interaction run terminated
+  32  023C         DETVAL    LDA #$08 ; subroutine to determine the similarity between two bytes
+  33  023E                   STA $05 ; store the bitlength of 8 as a loop counter
+  34  0240                   LDA $00 ; create working copies of the bytes at $00 and $01 into
+  35  0242                   STA $06 ; $06 and $07, respectively
+  36  0244                   LDA $01
+  37  0246                   STA $07
+  38  0248                   LDA #$00 ; zero out the match value at $04
+  39  024A                   STA $04
+  40  024C                   JSR CMPBIT ; compare the bits that are both 1
+  41  024F                   LDA #$08 ; prepare the byte length of 8 for the next comparison,
+  42  0251                   STA $05 ; again storing it in the loop counter
+  43  0253                   LDA #$FF ; XORing with 11111111b in order to produce NOT x
+  44  0255                   EOR $06 ; the idea being to switch the 0s to 1s
+  45  0257                   STA $00 ; in each of the two bytes, and vice versa, in order to
+  46  0259                   LDA #$FF
+  47  025B                   EOR $07
+  48  025D                   STA $01
+  49  025F                   JSR CMPBIT ; allow a second comparison, this time "matching 0s" (as 1s)
+  50  0262                   RTS ; return, with the count of matching digits in $04
+  51  0263         CMPBIT    LDA #$00 ; zero out the bytes $02 and $03,
+  52  0265                   STA $02 ; which are responsible for testing is there a corresponding bit
+  53  0267                   STA $03 ; in each of the bytes being checked
+  54  0269                   ASL $00 ; exfiltrate from the first byte one bit into the carry
+  55  026B                   ROR $02 ; and save the carry into $02
+  56  026D                   ASL $01 ; now exfiltrate a bit from the second byte into the carry
+  57  026F                   ROR $03 ; and save it into the second byte
+  58  0271                   LDA $02
+  59  0273                   CLC
+  60  0274                   AND $03 ; AND the saved carries, thus seeing were they both on
+  61  0276                   BEQ NOBIT ; if the result is 0, at least one was not on - bit not counted
+  62  0278                   INC $04 ; otherwise increase the sum of matching bits
+  63  027A         NOBIT     DEC $05 ; test are we done with all 8 bits,
+  64  027C                   BNE CMPBIT ; and if not, go compare the next bit
+  65  027E                   RTS
+  66  027F         SHIFTLP   LDY #$00 ; routine to shift bothhalves of the knowledge
+  67  0281         SHIFTL2   LDA $0301,Y ; first, shift all challenges, 300=301, 301=302,...
+  68  0284                   STA $0300,Y
+  69  0287                   LDA $0381,Y ; and then shift all replies, 380=381, 381=382,... 3fe=3ff
+  70  028A                   STA $0380,Y
+  71  028D                   TYA
+  72  028E                   CMP #$7F ; check did you shift 127 times, then end
+  73  0290                   BEQ ENDSHF
+  74  0292                   INY ; otherwise, prepare the offset to shift the next two numbers
+  75  0293                   JMP SHIFTL2
+  76  0296         ENDSHF    LDA $10 ; once shifting of the knowledge has been completed, 
+  77  0298                   STA $03FF ; save the user input as the newest reply
+  78  029B                   LDA $13 ; and save the machine's previous answer as the latest
+  79  029D                   STA $037F ; challenge for that reply to have been given.
+  80  02A0                   RTS
+
+symbols
+ CMPBIT     $0263
+ DETVAL     $023C
+ DOUPDT     $0224
+ ENDSHF     $0296
+ ENDVAL     $023B
+ NOBIT      $027A
+ NOUPD      $0232
+ SHIFTL2    $0281
+ SHIFTLP    $027F
+ VALUES     $0209
+
+pass 2
+
+LOC   CODE         LABEL     INSTRUCTION
+
+0200                         * = $0200
+                             ; lda #$9b  ; delete setup of user input and
+                             ; sta $10   ; simply input what you have to say each run into $10
+0200  20 7F 02               JSR $027F ; shift knowledge and update challenge-reply
+0203  A9 00                  LDA #$00 ; set intermediate best match ($11) to zero
+0205  85 11                  STA $11
+0207  A0 00                  LDY #$00 ; initialize knowledge array offset 
+0209  A5 10        VALUES    LDA $10 ; determine the best match to the input, copy input to $00
+020B  85 00                  STA $00
+020D  B9 80 03               LDA $0380,Y ; check the possible result reply: if it is 0, avoid it
+0210  C9 00                  CMP #$00
+0212  F0 1E                  BEQ $0232 ; i.e. do not even try to check the match quality, just skip it.
+0214  B9 00 03               LDA $0300,Y ; go through the first half of the knowledge array,
+0217  85 01                  STA $01 ; suggesting a possible match in $01 of input with experience
+0219  20 3C 02               JSR $023C ; determine the value of the suggested match
+021C  A5 11                  LDA $11 ; afterwards, compare the intermediate value in $11 with
+021E  C5 04                  CMP $04 ; the value of the match now in $04
+0220  F0 02                  BEQ $0224 ; optional: do update the intermediate match if equally good
+0222  B0 0E                  BCS $0232 ; if the match is not better, no intermediate match update occurs
+0224  A5 04        DOUPDT    LDA $04 ; if the match is better, take its value from $04
+0226  85 11                  STA $11 ; as the new intermediate value to compare against next
+0228  B9 00 03               LDA $0300,Y ; and also save the challenge
+022B  85 12                  STA $12 ; into $12, as well as the corresponding
+022D  B9 80 03               LDA $0380,Y ; reply into $13, as intermediate best (and at some point final)
+0230  85 13                  STA $13 ; reply, once the entire knowledge arrayis has been examined
+0232  98           NOUPD     TYA ; have we reached the end of the knowledge array?
+0233  C9 7E                  CMP #$7E ; max length of the array offset allowed
+0235  F0 04                  BEQ $023B ; if yes, terminate the run
+0237  C8                     INY ; otherwise, increase the offset towards the next knowledge element
+0238  4C 09 02               JMP $0209 ; and go evaluate does it maybe match the user challenge better
+023B  00           ENDVAL    BRK ; interaction run terminated
+023C  A9 08        DETVAL    LDA #$08 ; subroutine to determine the similarity between two bytes
+023E  85 05                  STA $05 ; store the bitlength of 8 as a loop counter
+0240  A5 00                  LDA $00 ; create working copies of the bytes at $00 and $01 into
+0242  85 06                  STA $06 ; $06 and $07, respectively
+0244  A5 01                  LDA $01
+0246  85 07                  STA $07
+0248  A9 00                  LDA #$00 ; zero out the match value at $04
+024A  85 04                  STA $04
+024C  20 63 02               JSR $0263 ; compare the bits that are both 1
+024F  A9 08                  LDA #$08 ; prepare the byte length of 8 for the next comparison,
+0251  85 05                  STA $05 ; again storing it in the loop counter
+0253  A9 FF                  LDA #$FF ; XORing with 11111111b in order to produce NOT x
+0255  45 06                  EOR $06 ; the idea being to switch the 0s to 1s
+0257  85 00                  STA $00 ; in each of the two bytes, and vice versa, in order to
+0259  A9 FF                  LDA #$FF
+025B  45 07                  EOR $07
+025D  85 01                  STA $01
+025F  20 63 02               JSR $0263 ; allow a second comparison, this time "matching 0s" (as 1s)
+0262  60                     RTS ; return, with the count of matching digits in $04
+0263  A9 00        CMPBIT    LDA #$00 ; zero out the bytes $02 and $03,
+0265  85 02                  STA $02 ; which are responsible for testing is there a corresponding bit
+0267  85 03                  STA $03 ; in each of the bytes being checked
+0269  06 00                  ASL $00 ; exfiltrate from the first byte one bit into the carry
+026B  66 02                  ROR $02 ; and save the carry into $02
+026D  06 01                  ASL $01 ; now exfiltrate a bit from the second byte into the carry
+026F  66 03                  ROR $03 ; and save it into the second byte
+0271  A5 02                  LDA $02
+0273  18                     CLC
+0274  25 03                  AND $03 ; AND the saved carries, thus seeing were they both on
+0276  F0 02                  BEQ $027A ; if the result is 0, at least one was not on - bit not counted
+0278  E6 04                  INC $04 ; otherwise increase the sum of matching bits
+027A  C6 05        NOBIT     DEC $05 ; test are we done with all 8 bits,
+027C  D0 E5                  BNE $0263 ; and if not, go compare the next bit
+027E  60                     RTS
+027F  A0 00        SHIFTLP   LDY #$00 ; routine to shift bothhalves of the knowledge
+0281  B9 01 03     SHIFTL2   LDA $0301,Y ; first, shift all challenges, 300=301, 301=302,...
+0284  99 00 03               STA $0300,Y
+0287  B9 81 03               LDA $0381,Y ; and then shift all replies, 380=381, 381=382,... 3fe=3ff
+028A  99 80 03               STA $0380,Y
+028D  98                     TYA
+028E  C9 7F                  CMP #$7F ; check did you shift 127 times, then end
+0290  F0 04                  BEQ $0296
+0292  C8                     INY ; otherwise, prepare the offset to shift the next two numbers
+0293  4C 81 02               JMP $0281
+0296  A5 10        ENDSHF    LDA $10 ; once shifting of the knowledge has been completed, 
+0298  8D FF 03               STA $03FF ; save the user input as the newest reply
+029B  A5 13                  LDA $13 ; and save the machine's previous answer as the latest
+029D  8D 7F 03               STA $037F ; challenge for that reply to have been given.
+02A0  60                     RTS
+
+done (code: 0200..02A0).
+
+
